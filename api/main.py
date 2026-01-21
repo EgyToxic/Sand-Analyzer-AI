@@ -1,80 +1,52 @@
-import os
+from fastapi import FastAPI, File, UploadFile
+import uvicorn
 import numpy as np
-from flask import Flask, request, jsonify
 import tensorflow as tf
-from tensorflow.keras.preprocessing import image
-from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 from PIL import Image
 import io
 
-# تعريف التطبيق
-app = Flask(__name__)
+# إعداد التطبيق
+app = FastAPI(title="Sand Inspector API", version="1.0")
 
-# إعدادات الموديل
-MODEL_PATH = 'model.keras'
-model = None
+# تحميل الموديل مرة واحدة
+print("⏳ Loading Model...")
+model = tf.keras.models.load_model('model.keras')
+print("✅ Model Loaded Successfully!")
 
-# دالة تحميل الموديل (تتم مرة واحدة عند بدء التشغيل)
-def load_model():
-    global model
-    if model is None:
-        model = tf.keras.models.load_model(MODEL_PATH)
-        print("✅ Model loaded successfully!")
+@app.get("/")
+def home():
+    return {"message": "🚀 FastAPI is Running on Hugging Face!"}
 
-@app.route('/', methods=['GET'])
-def index():
-    return "🏗️ AI Sand Inspection API is Running!"
-
-@app.route('/predict', methods=['POST'])
-def predict():
-    # التأكد من تحميل الموديل
-    if model is None:
-        load_model()
-
-    # التأكد من وجود ملف في الطلب
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
+@app.post("/predict")
+async def predict(file: UploadFile = File(...)):
+    # قراءة الملف
+    contents = await file.read()
     
-    file = request.files['file']
+    # معالجة الصورة
+    img = Image.open(io.BytesIO(contents)).convert('RGB')
+    img = img.resize((224, 224))
+    img_array = np.array(img)
+    img_array = np.expand_dims(img_array, axis=0)
+    img_array = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
     
-    try:
-        # 1. قراءة الصورة ومعالجتها
-        img = Image.open(file.stream).convert('RGB')
-        img = img.resize((224, 224))
-        img_array = image.img_to_array(img)
-        img_array = np.expand_dims(img_array, axis=0)
-        img_array = preprocess_input(img_array)
+    # التوقع
+    prediction = model.predict(img_array)[0][0]
+    
+    prob_unacceptable = float(prediction)
+    prob_acceptable = 1.0 - prob_unacceptable
+    
+    label = "Unacceptable"
+    confidence = prob_unacceptable
+    
+    if prob_acceptable > 0.5:
+        label = "Acceptable"
+        confidence = prob_acceptable
 
-        # 2. التوقع
-        prediction = model.predict(img_array, verbose=0)[0][0]
-        
-        # 3. تفسير النتيجة
-        prob_unacceptable = float(prediction)
-        prob_acceptable = 1.0 - prob_unacceptable
-        
-        label = "Unacceptable"
-        confidence = prob_unacceptable
-        
-        if prob_acceptable > 0.5:
-            label = "Acceptable"
-            confidence = prob_acceptable
-
-        # 4. إرسال الرد (JSON)
-        response = {
-            'prediction': label,
-            'confidence_score': f"{confidence*100:.2f}%",
-            'details': {
-                'acceptable_prob': f"{prob_acceptable:.4f}",
-                'unacceptable_prob': f"{prob_unacceptable:.4f}"
-            },
-            'engineering_decision': 'SAFE' if prob_acceptable > 0.8 else 'REJECTED/WARNING'
+    return {
+        "prediction": label,
+        "confidence": f"{confidence*100:.2f}%",
+        "details": {
+            "acceptable_score": float(prob_acceptable),
+            "unacceptable_score": float(prob_unacceptable)
         }
-        
-        return jsonify(response)
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-if __name__ == '__main__':
-    load_model()
-    app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+    }
